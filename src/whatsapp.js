@@ -32,7 +32,6 @@ async function connectWhatsApp() {
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
     logger,
     browser: ["Kaippulli Temple Bot", "Chrome", "1.0"],
     connectTimeoutMs: 60_000,
