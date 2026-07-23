@@ -31,7 +31,7 @@ async function connectWhatsApp() {
   sock = makeWASocket({
     auth: state,
     logger,
-    browser: ["Kaippulli Temple Bot", "Chrome", "1.0"],
+    browser: ["Ubuntu", "Chrome", "120.0.0.0"],
     connectTimeoutMs: 120_000,
     keepAliveIntervalMs: 30_000,
     markOnlineOnConnect: true,
