@@ -40,8 +40,7 @@ app.get("/health", (req, res) => {
 app.get("/qr", async (req, res) => {
   let buffer = await getQRImage();
   if (!buffer) {
-    // No QR yet — trigger one and wait
-    buffer = await waitForQR;
+    buffer = await waitForQR();
   }
   if (buffer) {
     res.setHeader("Content-Type", "image/png");
