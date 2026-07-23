@@ -7,7 +7,8 @@ RUN apk add --no-cache \
     g++ \
     git \
     libc6-compat \
-    vips-dev
+    vips-dev \
+    ca-certificates
 
 WORKDIR /app
 
