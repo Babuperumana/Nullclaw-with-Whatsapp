@@ -1,10 +1,11 @@
 FROM node:20-alpine AS base
 
-# Install sharp dependencies for Baileys media handling
+# Install build tools + git (Baileys needs git during npm install)
 RUN apk add --no-cache \
     python3 \
     make \
     g++ \
+    git \
     libc6-compat \
     vips-dev
 
