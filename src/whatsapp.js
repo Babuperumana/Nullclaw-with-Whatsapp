@@ -71,9 +71,22 @@ async function connectWhatsApp() {
       const reason = lastDisconnect?.error?.message || "unknown";
       console.log(`[WA] Disconnected (code: ${code}, reason: ${reason})`);
       const shouldReconnect = code !== DisconnectReason.loggedOut;
+
       if (shouldReconnect) {
-        console.log("[WA] Reconnecting in 5s...");
-        setTimeout(connectWhatsApp, 5000);
+        let delay;
+        if (code === 405) {
+          console.log("[WA] ⚠️  WhatsApp rejected registration (code 405).");
+          console.log("[WA]   Possible causes:");
+          console.log("[WA]   - Too many failed attempts (wait 5+ minutes)");
+          console.log("[WA]   - Max linked devices reached (4 per account)");
+          console.log("[WA]   - Unlink a device from WhatsApp → Linked Devices first");
+          delay = 300000 + Math.floor(Math.random() * 120000); // 5-7 min
+          console.log(`[WA]   Retrying in ${Math.round(delay/60000)} minutes...`);
+        } else {
+          delay = 5000 + Math.floor(Math.random() * 5000);
+          console.log(`[WA] Reconnecting in ${Math.round(delay/1000)}s...`);
+        }
+        setTimeout(connectWhatsApp, delay);
       } else {
         console.log("[WA] Session logged out. Clear auth and restart.");
       }
