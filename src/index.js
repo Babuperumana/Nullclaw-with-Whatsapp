@@ -13,16 +13,15 @@
 require("dotenv").config();
 
 const express = require("express");
-const { connectWhatsApp } = require("./whatsapp");
+const { connectWhatsApp, getQRImage, waitForQR } = require("./whatsapp");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
-// ── Express App ──────────────────────────────────────────────
 const app = express();
 
 app.use(express.json());
 
-// Health check endpoint — Coolify uses this to verify the container is up
+// Health check
 app.get("/", (req, res) => {
   res.json({
     service: "nullclaw-whatsapp",
@@ -37,18 +36,35 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// QR code endpoint — visit this URL to scan WhatsApp login QR
+app.get("/qr", async (req, res) => {
+  let buffer = await getQRImage();
+  if (!buffer) {
+    // No QR yet — trigger one and wait
+    buffer = await waitForQR;
+  }
+  if (buffer) {
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store, no-cache");
+    res.send(buffer);
+  } else {
+    res.status(404).send("QR not available. Check if the bot needs authentication.");
+  }
+});
+
 // ── Start ─────────────────────────────────────────────────────
 async function main() {
   console.log("\n🙏 Starting Kaippulli Temple AI Assistant...\n");
 
-  // Validate required env vars
   if (!process.env.OPENAI_API_KEY) {
     console.warn("⚠️  OPENAI_API_KEY not set — AI responses will fail.");
   }
 
   // Start Express
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🌐 Health server listening on port ${PORT}`);
+    console.log(`🌐 Server listening on port ${PORT}`);
+    console.log(`   Health:  http://nullclaw.kaippulli.sbs/`);
+    console.log(`   QR scan: http://nullclaw.kaippulli.sbs/qr\n`);
   });
 
   // Connect WhatsApp
@@ -58,7 +74,7 @@ async function main() {
   } catch (err) {
     console.error("❌ Failed to connect WhatsApp:", err);
     console.log("🔄 Will retry in 10 seconds...");
-    setTimeout(main, 10_000);
+    setTimeout(main, 10000);
   }
 }
 

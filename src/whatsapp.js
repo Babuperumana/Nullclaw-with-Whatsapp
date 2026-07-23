@@ -1,95 +1,110 @@
 /**
  * WhatsApp Module — Baileys socket management, message handling, and response delivery.
  *
- * Flow:
- *   1. Start Baileys connection → QR printed to logs
- *   2. User scans QR → connection established
- *   3. Incoming messages → AI response streamed back via WhatsApp
+ * Auth:
+ *   - Stores credentials in AUTH_DIR (mounted volume for persistence)
+ *   - On first run (no creds): generates QR code, saves as PNG
+ *   - User scans QR → creds saved → subsequent restarts are seamless
+ *
+ * QR access:
+ *   - Saved as PNG: /app/data/auth-info/qr.png
+ *   - Served at: GET /qr (from index.js)
  */
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const pino = require("pino");
-const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
 const { chatStream } = require("./ai");
+const fs = require("fs");
+const path = require("path");
 
-// Logger
 const logger = pino({ level: "info" });
 
-// Auth state directory (persisted on disk for session reuse)
 const AUTH_DIR = process.env.AUTH_DIR || "./data/auth-info";
-
-// Owner number (optional: only respond to this number if set)
 const OWNER_NUMBER = process.env.WHATSAPP_OWNER_NUMBER || null;
+const QR_FILE = path.join(AUTH_DIR, "qr.png");
 
-// Active socket reference
 let sock = null;
+let qrResolve = null; // promise resolver for QR readiness
 
-/**
- * Start the WhatsApp socket connection.
- * Returns the socket instance and a listener map.
- */
 async function connectWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  // Check if already authenticated
+  const hasCreds = state.creds && state.creds.registered;
+  console.log(`[WA] Auth state: ${hasCreds ? "already logged in" : "no credentials — need QR scan"}`);
 
   sock = makeWASocket({
     auth: state,
     logger,
     browser: ["Kaippulli Temple Bot", "Chrome", "1.0"],
-    connectTimeoutMs: 60_000,
+    connectTimeoutMs: 120_000,
     keepAliveIntervalMs: 30_000,
     markOnlineOnConnect: true,
     syncFullHistory: false,
-    qrOnFailure: true
+    qrOnFailure: true,
+    getError: (error) => {
+      // Log errors instead of silently swallowing them
+      console.error("[WA] Socket error:", error?.message || error);
+      return undefined;
+    }
   });
 
-  // Persist credentials on every update
   sock.ev.on("creds.update", saveCreds);
 
-  // Handle QR codes (Baileys v6 emits QR via separate event too)
-  sock.ev.on("qr", (qr) => {
+  // Listen for QR — Baileys v6 emits via connection.update or qr event
+  const handleQR = async (qr) => {
     console.log("\n" + "═".repeat(50));
-    console.log("  🙏 Kaippulli Temple Bot — WhatsApp Login");
-    console.log("  Open WhatsApp → Linked Devices → Link a Device");
-    console.log("  Scan the QR code below:");
+    console.log("  🙏 Kaippulli Temple Bot — WhatsApp Login Required");
+    console.log("  1. Open WhatsApp on your phone");
+    console.log("  2. Tap Linked Devices → Link a Device");
+    console.log("  3. Scan the QR code:");
+    console.log("  → Visit http://nullclaw.kaippulli.sbs/qr");
     console.log("═".repeat(50));
-    qrcode.generate(qr, { small: true });
-    console.log("═".repeat(50) + "\n");
-  });
+    try {
+      await QRCode.toFile(QR_FILE, qr, {
+        width: 512,
+        margin: 2,
+        color: { dark: "#000000", light: "#ffffff" }
+      });
+      console.log("   QR image saved. Visit /qr to scan.\n");
+    } catch (err) {
+      console.error("   Failed to save QR image:", err.message);
+      console.log("   QR string:", qr);
+    }
+    if (qrResolve) qrResolve();
+  };
 
-  // Handle connection state changes
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect } = update;
+  sock.ev.on("qr", handleQR);
 
-    // QR is now handled by the 'qr' event above
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr && !hasCreds) {
+      await handleQR(qr);
+    }
 
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      logger.warn(
-        `WhatsApp connection closed. Reconnecting: ${shouldReconnect}`
-      );
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      logger.warn(`WhatsApp closed (code: ${code}). Reconnecting: ${shouldReconnect}`);
       if (shouldReconnect) {
-        setTimeout(connectWhatsApp, 3000);
+        setTimeout(connectWhatsApp, 5000);
       } else {
-        logger.error(
-          "WhatsApp session expired. Please scan QR code again."
-        );
-        console.log("\n⚠️  WhatsApp session logged out. Delete the auth-info directory and restart to get a new QR.\n");
+        console.log("\n⚠️  Session logged out. Clear auth and restart.\n");
       }
     }
 
     if (connection === "open") {
-      logger.info("✅ WhatsApp connected successfully!");
-      console.log("\n🙏 Kaippulli Temple AI Assistant is now online on WhatsApp!\n");
+      logger.info("✅ WhatsApp connected!");
+      console.log("\n🙏 Kaippulli Temple AI Assistant is online!\n");
+      try { fs.unlinkSync(QR_FILE); } catch {}
     }
   });
 
-  // Handle incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     for (const msg of m.messages) {
-      // Skip non-user messages (status updates, own messages, etc.)
       if (!msg.message || msg.key.fromMe) continue;
-
       await handleMessage(sock, msg);
     }
   });
@@ -97,34 +112,20 @@ async function connectWhatsApp() {
   return sock;
 }
 
-/**
- * Handle a single incoming WhatsApp message.
- */
 async function handleMessage(sock, msg) {
   const remoteJid = msg.key.remoteJid;
 
-  // Ignore group messages (optional — remove this to enable groups)
-  if (remoteJid.endsWith("@g.us")) {
-    return;
-  }
+  if (remoteJid.endsWith("@g.us")) return;
+  if (OWNER_NUMBER && !remoteJid.includes(OWNER_NUMBER)) return;
 
-  // Check if message is from owner only
-  if (OWNER_NUMBER && !remoteJid.includes(OWNER_NUMBER)) {
-    return;
-  }
-
-  // Extract text from message (handle different message types)
   const text = extractText(msg.message);
-
   if (!text) {
-    // Ignore non-text messages (images, audio, etc.) for now
-    console.log(`[WA] Non-text message from ${remoteJid}`);
+    console.log(`[WA] Non-text from ${remoteJid}`);
     return;
   }
 
   console.log(`[WA] ${remoteJid}: ${text}`);
 
-  // Handle special commands
   if (text.toLowerCase() === "/reset") {
     const { clearConversation } = require("./ai");
     clearConversation(remoteJid);
@@ -133,70 +134,63 @@ async function handleMessage(sock, msg) {
   }
 
   if (text.toLowerCase() === "/help") {
-    await sendReply(
-      sock,
-      remoteJid,
-      "🙏 *Kaippulli Temple Assistant*\n\nCommands:\n/reset — Clear conversation history\n/help — Show this message\n\nOr just ask me about the temple, timings, festivals, rituals, and more!"
+    await sendReply(sock, remoteJid,
+      "🙏 *Kaippulli Temple Assistant*\n\n/reset — Clear history\n/help — This message\n\nAsk about darshan timings, festivals, rituals, and more!"
     );
     return;
   }
 
-  // Send typing indicator, then stream AI response
   await sendTypingIndicator(sock, remoteJid);
-
   let replyText = "";
-  await chatStream(remoteJid, text, (chunk) => {
-    replyText += chunk;
-  });
-
-  // Send the complete response
-  if (replyText.trim()) {
-    await sendReply(sock, remoteJid, replyText.trim());
-  }
+  await chatStream(remoteJid, text, (chunk) => { replyText += chunk; });
+  if (replyText.trim()) await sendReply(sock, remoteJid, replyText.trim());
 }
 
-/**
- * Extract readable text from a Baileys message object.
- */
 function extractText(message) {
-  // Plain text
   if (message.conversation) return message.conversation;
-  // Extended text (with formatting)
   if (message.extendedTextMessage?.text) return message.extendedTextMessage.text;
   return null;
 }
 
-/**
- * Send a text reply to a WhatsApp chat.
- */
 async function sendReply(sock, remoteJid, text) {
-  try {
-    await sock.sendMessage(remoteJid, { text });
-  } catch (err) {
-    logger.error(`[WA] Failed to send reply: ${err.message}`);
-  }
+  try { await sock.sendMessage(remoteJid, { text }); }
+  catch (err) { logger.error(`[WA] Send failed: ${err.message}`); }
 }
 
-/**
- * Show typing indicator in the chat.
- */
 async function sendTypingIndicator(sock, remoteJid) {
+  try { await sock.sendPresenceUpdate("composing", remoteJid); } catch {}
+}
+
+function getSocket() { return sock; }
+
+async function getQRImage() {
   try {
-    await sock.sendPresenceUpdate("composing", remoteJid);
-  } catch {
-    // Typing indicator is best-effort
-  }
+    if (fs.existsSync(QR_FILE)) return fs.readFileSync(QR_FILE);
+  } catch {}
+  return null;
 }
 
 /**
- * Get the active socket (for health checks).
+ * Wait for a QR code to be generated (with timeout).
+ * Returns the QR PNG buffer or null on timeout.
  */
-function getSocket() {
-  return sock;
+async function waitForQR(timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      qrResolve = null;
+      resolve(null);
+    }, timeoutMs);
+    qrResolve = () => {
+      clearTimeout(timer);
+      qrResolve = null;
+      getQRImage().then(resolve);
+    };
+  });
 }
 
 module.exports = {
   connectWhatsApp,
   getSocket,
-  sendReply
+  getQRImage,
+  waitForQR
 };
