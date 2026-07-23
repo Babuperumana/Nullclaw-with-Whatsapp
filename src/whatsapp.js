@@ -159,15 +159,37 @@ async function sendTypingIndicator(sock, remoteJid) {
 
 function getSocket() { return sock; }
 
-async function getQRImage() {
+function getQRImage() {
   try {
     if (fs.existsSync(QR_FILE)) return fs.readFileSync(QR_FILE);
   } catch {}
   return null;
 }
 
+/**
+ * Create a promise that resolves when QR is generated.
+ * Used by index.js /qr endpoint for direct socket QR.
+ */
+function waitForQR() {
+  return new Promise((resolve) => {
+    const handler = (update) => {
+      if (update.qr) {
+        sock.ev.off("connection.update", handler);
+        resolve(update.qr);
+      }
+    };
+    sock.ev.on("connection.update", handler);
+    // Timeout after 2 minutes
+    setTimeout(() => {
+      sock.ev.off("connection.update", handler);
+      resolve(null);
+    }, 120_000);
+  });
+}
+
 module.exports = {
   connectWhatsApp,
   getSocket,
-  getQRImage
+  getQRImage,
+  waitForQR
 };
