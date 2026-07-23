@@ -9,6 +9,7 @@
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const pino = require("pino");
+const qrcode = require("qrcode-terminal");
 const { chatStream } = require("./ai");
 
 // Logger
@@ -37,24 +38,29 @@ async function connectWhatsApp() {
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 30_000,
     markOnlineOnConnect: true,
-    syncFullHistory: false
+    syncFullHistory: false,
+    qrOnFailure: true
   });
 
   // Persist credentials on every update
   sock.ev.on("creds.update", saveCreds);
 
+  // Handle QR codes (Baileys v6 emits QR via separate event too)
+  sock.ev.on("qr", (qr) => {
+    console.log("\n" + "═".repeat(50));
+    console.log("  🙏 Kaippulli Temple Bot — WhatsApp Login");
+    console.log("  Open WhatsApp → Linked Devices → Link a Device");
+    console.log("  Scan the QR code below:");
+    console.log("═".repeat(50));
+    qrcode.generate(qr, { small: true });
+    console.log("═".repeat(50) + "\n");
+  });
+
   // Handle connection state changes
   sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect } = update;
 
-    if (qr) {
-      logger.info("📱 QR Code received — scan with WhatsApp to authenticate");
-      console.log("\n" + "═".repeat(50));
-      console.log("  QR CODE FOR WHATSAPP AUTHENTICATION");
-      console.log("  Open WhatsApp → Linked Devices → Link a Device");
-      console.log("  Scan the QR code in the Coolify deploy logs");
-      console.log("═".repeat(50) + "\n");
-    }
+    // QR is now handled by the 'qr' event above
 
     if (connection === "close") {
       const shouldReconnect =
