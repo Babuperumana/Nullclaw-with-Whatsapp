@@ -2,13 +2,9 @@
  * WhatsApp Module — Baileys socket management, message handling, and response delivery.
  *
  * Auth:
- *   - Stores credentials in AUTH_DIR (mounted volume for persistence)
- *   - On first run (no creds): generates QR code, saves as PNG
- *   - User scans QR → creds saved → subsequent restarts are seamless
- *
- * QR access:
- *   - Saved as PNG: /app/data/auth-info/qr.png
- *   - Served at: GET /qr (from index.js)
+ *   - Credentials stored in AUTH_DIR (mounted volume for persistence)
+ *   - First run: Baileys emits QR via connection.update → saved as PNG
+ *   - User scans via http://<server>:3000/qr → creds persisted → restarts seamless
  */
 
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
@@ -25,14 +21,12 @@ const OWNER_NUMBER = process.env.WHATSAPP_OWNER_NUMBER || null;
 const QR_FILE = path.join(AUTH_DIR, "qr.png");
 
 let sock = null;
-let qrResolve = null; // promise resolver for QR readiness
 
 async function connectWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
-  // Check if already authenticated
-  const hasCreds = state.creds && state.creds.registered;
-  console.log(`[WA] Auth state: ${hasCreds ? "already logged in" : "no credentials — need QR scan"}`);
+  const registered = state.creds?.registered;
+  console.log(`[WA] Auth: ${registered ? "logged in" : "no credentials — QR scan required"}`);
 
   sock = makeWASocket({
     auth: state,
@@ -41,63 +35,52 @@ async function connectWhatsApp() {
     connectTimeoutMs: 120_000,
     keepAliveIntervalMs: 30_000,
     markOnlineOnConnect: true,
-    syncFullHistory: false,
-    qrOnFailure: true,
-    getError: (error) => {
-      // Log errors instead of silently swallowing them
-      console.error("[WA] Socket error:", error?.message || error);
-      return undefined;
-    }
+    syncFullHistory: false
   });
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", () => {
+    saveCreds();
+    console.log("[WA] Credentials saved.");
+  });
 
-  // Listen for QR — Baileys v6 emits via connection.update or qr event
-  const handleQR = async (qr) => {
-    console.log("\n" + "═".repeat(50));
-    console.log("  🙏 Kaippulli Temple Bot — WhatsApp Login Required");
-    console.log("  1. Open WhatsApp on your phone");
-    console.log("  2. Tap Linked Devices → Link a Device");
-    console.log("  3. Scan the QR code:");
-    console.log("  → Visit http://nullclaw.kaippulli.sbs/qr");
-    console.log("═".repeat(50));
-    try {
-      await QRCode.toFile(QR_FILE, qr, {
-        width: 512,
-        margin: 2,
-        color: { dark: "#000000", light: "#ffffff" }
-      });
-      console.log("   QR image saved. Visit /qr to scan.\n");
-    } catch (err) {
-      console.error("   Failed to save QR image:", err.message);
-      console.log("   QR string:", qr);
-    }
-    if (qrResolve) qrResolve();
-  };
-
-  sock.ev.on("qr", handleQR);
-
+  // BAileys v6: QR comes through connection.update, NOT a separate "qr" event
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr && !hasCreds) {
-      await handleQR(qr);
+    // QR arrives here in v6 — save it as a PNG
+    if (qr) {
+      console.log("\n" + "═".repeat(55));
+      console.log("  🙏 SCAN QR — Visit: http://nullclaw.kaippulli.sbs/qr");
+      console.log("  Or: WhatsApp → Linked Devices → Link a Device");
+      console.log("═".repeat(55));
+      try {
+        await QRCode.toFile(QR_FILE, qr, {
+          width: 512,
+          margin: 2,
+          color: { dark: "#000000", light: "#ffffff" }
+        });
+        console.log(`   Saved: ${QR_FILE}\n`);
+      } catch (err) {
+        console.error("   QR save error:", err.message);
+        console.log("   QR string:", qr);
+      }
     }
 
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
+      const reason = lastDisconnect?.error?.message || "unknown";
+      console.log(`[WA] Disconnected (code: ${code}, reason: ${reason})`);
       const shouldReconnect = code !== DisconnectReason.loggedOut;
-      logger.warn(`WhatsApp closed (code: ${code}). Reconnecting: ${shouldReconnect}`);
       if (shouldReconnect) {
+        console.log("[WA] Reconnecting in 5s...");
         setTimeout(connectWhatsApp, 5000);
       } else {
-        console.log("\n⚠️  Session logged out. Clear auth and restart.\n");
+        console.log("[WA] Session logged out. Clear auth and restart.");
       }
     }
 
     if (connection === "open") {
-      logger.info("✅ WhatsApp connected!");
-      console.log("\n🙏 Kaippulli Temple AI Assistant is online!\n");
+      console.log("\n🙏 Kaippulli Temple AI Assistant is ONLINE!\n");
       try { fs.unlinkSync(QR_FILE); } catch {}
     }
   });
@@ -135,7 +118,7 @@ async function handleMessage(sock, msg) {
 
   if (text.toLowerCase() === "/help") {
     await sendReply(sock, remoteJid,
-      "🙏 *Kaippulli Temple Assistant*\n\n/reset — Clear history\n/help — This message\n\nAsk about darshan timings, festivals, rituals, and more!"
+      "🙏 *Kaippulli Temple Assistant*\n\n/reset — Clear history\n/help — This message\n\nAsk about darshan, festivals, rituals, and more!"
     );
     return;
   }
@@ -154,7 +137,7 @@ function extractText(message) {
 
 async function sendReply(sock, remoteJid, text) {
   try { await sock.sendMessage(remoteJid, { text }); }
-  catch (err) { logger.error(`[WA] Send failed: ${err.message}`); }
+  catch (err) { console.error(`[WA] Send error: ${err.message}`); }
 }
 
 async function sendTypingIndicator(sock, remoteJid) {
@@ -170,27 +153,8 @@ async function getQRImage() {
   return null;
 }
 
-/**
- * Wait for a QR code to be generated (with timeout).
- * Returns the QR PNG buffer or null on timeout.
- */
-async function waitForQR(timeoutMs = 120000) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      qrResolve = null;
-      resolve(null);
-    }, timeoutMs);
-    qrResolve = () => {
-      clearTimeout(timer);
-      qrResolve = null;
-      getQRImage().then(resolve);
-    };
-  });
-}
-
 module.exports = {
   connectWhatsApp,
   getSocket,
-  getQRImage,
-  waitForQR
+  getQRImage
 };
